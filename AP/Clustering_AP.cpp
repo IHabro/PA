@@ -7,178 +7,11 @@
 #include <chrono>
 #include <iomanip>
 #include <algorithm>
+#include <limits>
+#include <fstream>
+#include <unistd.h>
 
 using namespace std;
-
-#pragma region "k-means"
-
-/*
-Podpora pro pragmu simd musi byt explicitne zapnuta;
-	> MSVC: https://learn.microsoft.com/cs-cz/cpp/build/reference/openmp-enable-openmp-2-0-support?view=msvc-170
-	> GCC: -fopenmp -fopenmp-simd
-	> clang: -openmp-simd
-
-U GCC je jeste treba dat pozor na optimalizaci. Prekladac pri pouziti -O3 provadi vektorizaci cyklu i bez OpenMP,
-takze efekt pragmy neni vyrazny.
-*/
-double eucl_distance_simd(const double* x, const double* y, const unsigned int n)
-{
-	double dist = 0;
-
-	#pragma omp simd reduction(+:dist)
-	for (unsigned int i = 0; i < n; i++)
-	{
-		dist += (x[i] - y[i]) * (x[i] - y[i]);
-	}
-
-	return sqrt(dist);
-}
-
-double eucl_distance(const double* x, const double* y, const unsigned int n)
-{
-	double dist = 0;
-
-	for (unsigned int i = 0; i < n; i++)
-	{
-		dist += (x[i] - y[i]) * (x[i] - y[i]);
-	}
-
-	return sqrt(dist);
-}
-
-void say_hello()
-{
-#pragma omp parallel
-	{
-		unsigned int tid = omp_get_thread_num();
-		cout << "Hello from thread " << tid << endl;
-	}
-}
-
-/*
-	Chovani funkce rand() ze standardni knihovny C zavisi na implementaci,
-	obecne neni prilis vhodna pro pouziti ve vice vlaknech. Obecne je
-	thread-safe [1], ale muze byt velmi neefektivni. V Linuxove implementaci
-	vyuziva mutex, kterym dalsi vlakna blokuje [2].
-
-	Toto chovani lze vyzkouset na nasledujicim kodu - varianta s
-		>	#omp parallel for
-	je mohem pomalejsi, nez varianta bez.
-
-	Toto resi funkce rand_r [1]. U te je ale treba dat pozor na inicializaci.
-	Pri pouziti klasickeho ''kouknuti na hodinky'' time(NULL) se velmi lehce stane,
-	ze se RNG ve vice vlaknech inicializuje na stejnou hodnotu a obe vlakna
-	tak generuji stejnou posloupnost cisel.
-
-	Refs
-		[1] https://man7.org/linux/man-pages/man3/srand.3.html
-		[2] https://www.evanjones.ca/random-thread-safe.html
-*/
-void vector_gen(double* a, unsigned int n)
-{
-	// #pragma omp parallel for
-	for (unsigned int i = 0; i < n; i++)
-	{
-		a[i] = (double)rand() / RAND_MAX;
-	}
-}
-
-/*
-// void vector_gen_p(double* a, unsigned int n)
-// {
-// #pragma omp parallel
-// 	{
-// 		unsigned int seed = time(NULL) << omp_get_thread_num();
-
-// #pragma omp for
-// 		for (unsigned int i = 0; i < n; i++)
-// 		{
-// 			a[i] = (double)rand_r(&seed) / RAND_MAX;
-// 		}
-// 	}
-// }
-
-// Nekolik "slozitych" operaci pro simulovani workloadu.
-// Je dodrzena nezavislost iteraci, takze je mozno paralelizovat pomoci
-// 	>	#omp parallel for
-// void vector_add(double* a, double* b, unsigned int n)
-// {
-// #pragma omp parallel for
-// 	for (unsigned int i = 0; i < n; i++)
-// 	{
-// 		a[i] = a[i] * sin(2 * M_PI * n);
-// 		b[i] = b[i] * sin(M_PI * n + M_PI / 2);
-// 		a[i] += b[i];
-// 	}
-// }
-*/
-
-void step_1(const unsigned int m, const unsigned int n)
-{
-	say_hello();
-
-	double* a = new double[m * n];
-	double* b = new double[m * n];
-	memset(a, 0, sizeof(double) * m * n);
-	memset(b, 0, sizeof(double) * m * n);
-
-	auto start = chrono::steady_clock::now();
-	//vector_gen_p(a, m * n);
-	auto stop = chrono::steady_clock::now();
-	chrono::duration<double> elapsed = stop - start;
-	cout << "gen 1: " << elapsed.count() << endl;
-
-	start = chrono::steady_clock::now();
-	vector_gen(b, m * n);
-	stop = chrono::steady_clock::now();
-	elapsed = stop - start;
-	cout << "gen 2: " << elapsed.count() << endl;
-
-	start = chrono::steady_clock::now();
-	//vector_add(a, b, m * n);
-	stop = chrono::steady_clock::now();
-	elapsed = stop - start;
-	cout << "  add: " << elapsed.count() << endl;
-
-	delete[] a;
-	delete[] b;
-}
-
-void step_2(const unsigned int m, const unsigned int n, const bool use_simd)
-{
-	double* data = new double[m * n];
-
-	auto start = chrono::steady_clock::now();
-	//vector_gen_p(data, m * n);
-	auto stop = chrono::steady_clock::now();
-
-	chrono::duration<double>  elapsed = stop - start;
-	cout << "gen 1: " << elapsed.count() << endl;
-
-	vector<double> dists;
-	dists.resize(m);
-
-	start = chrono::steady_clock::now();
-
-#pragma omp parallel for
-	for (unsigned int i = 0; i < m; i++)
-	{
-		if (use_simd)
-			dists[i] = eucl_distance_simd(data, data + n * i, n);
-		else
-			dists[i] = eucl_distance(data, data + n * i, n);
-	}
-
-	stop = chrono::steady_clock::now();
-	elapsed = stop - start;
-	cout << " dist: " << elapsed.count() << endl;
-
-	for (unsigned int i = 0; i < 10; i++)
-		cout << dists[i] << endl;
-
-	delete[] data;
-}
-#pragma endregion
 
 #pragma region "Affinity Propagation"
 struct Pair
@@ -191,48 +24,92 @@ bool cmp(Pair &a, Pair &b)
 {
 	if (a.clusterNum < b.clusterNum)
 	{
-		return true;
+		return true;vector<Pair> newClusters = vector<Pair>();
+
 	}
 
 	return false;	
 }
 
-vector<vector<double>> Sml = vector<vector<double>>();
-vector<vector<double>> Rsp = vector<vector<double>>();
-vector<vector<double>> Avl = vector<vector<double>>();
-vector<vector<double>> Crt = vector<vector<double>>();
 int rows = -1, cols = -1;	//rows could also be called numberOfPoints
-
+int diffCount = 0, newDiffcount = 0;
+vector<vector<int>> Sml = vector<vector<int>>();
+vector<vector<int>> Rsp = vector<vector<int>>();
+vector<vector<int>> Avl = vector<vector<int>>();
+vector<vector<int>> Crt = vector<vector<int>>();
 vector<Pair> clusters = vector<Pair>();
-std::vector<std::vector<double>> testData =
+vector<Pair> newClusters = vector<Pair>();
+std::vector<std::vector<int>> testData =
 {
-	{1.0, 2.0, 0.5},
-	{1.5, 1.8, 0.6},
-	{5.0, 8.0, 2.0},
-	{8.0, 8.0, 1.5},
-	{1.0, 0.6, 0.3},
-	{9.0, 11.0, 3.0},
-	{8.0, 2.0, 1.0},
-	{10.0, 2.0, 2.0},
-	{9.0, 3.0, 0.8},
-	{3.0, 3.0, 1.2},
-	{4.0, 6.0, 2.5},
-	{7.0, 6.0, 1.8},
-	{5.0, 3.0, 0.7},
-	{6.0, 8.0, 2.3},
-	{2.0, 7.0, 1.2}
+	{1, 2, 0},
+	{2, 1, 0},
+	{5, 8, 2},
+	{8, 8, 1},
+	{1, 0, 0},
+	{9, 11, 3},
+	{8, 2, 1},
+	{10, 2, 2},
+	{9, 3, 0},
+	{3, 3, 1},
+	{4, 6, 2},
+	{7, 6, 1},
+	{5, 3, 0},
+	{6, 8, 2},
+	{2, 7, 1}
 };
 
-vector<vector<double>> LoadData(string filePath)
+void LoadData(string filePath)
 {
-	rows = testData.size();
-	cols = testData[0].size();
+	vector<int> mdn = vector<int>();
+	string line;
+	ifstream file;
+	file.open(filePath);
+	int iter = 0;
 
-	vector<vector<double>> result = vector<vector<double>>();
+	// Remove first row with labels
+	getline(file, line);
+	while (getline(file, line))
+	{
+		iter++;
+		vector<int> tmp = vector<int>();
+		stringstream ss(line); 
+    	string word;
 
+		while (getline(ss, word, ','))
+		{
+			int i = stoi(word);
+			tmp.push_back(i);
+			mdn.push_back(i);
+    	}
 
+		vector<int> empty(tmp.size(), 0);
+		Sml.push_back(tmp);
+		Rsp.push_back(empty);
+		Avl.push_back(empty);
+		Crt.push_back(empty);
+	}
+	file.close();
 
-	return result;
+	// Set medians
+	int mdnSize = mdn.size(), median = 0;
+	std::sort(mdn.begin(), mdn.end());
+	if (mdnSize % 2 == 0)
+	{
+		median = 0.5 * (mdn[(mdnSize / 2) - 1] + mdn[mdnSize / 2]);
+	}
+	else
+	{
+		median = mdn[mdnSize / 2];
+	}
+
+#pragma omp parallel for
+	for (int i = 0; i < rows; i++)
+	{
+		Sml[i][i] = median;
+	}
+
+	rows = Sml.size();
+	cols = Sml[0].size();
 }
 
 void PrintAffinityData(vector<vector<double>>& data)
@@ -312,7 +189,11 @@ void PrintMatricies()
 		cout << "\n";
 	}
 	cout << "---------------------------------------------------------------\n" << endl;
+}
 
+void PrintClusters()
+{
+	int i;
 	sort(clusters.begin(), clusters.end(), cmp);
 
 	cout << "Points: ";
@@ -332,6 +213,7 @@ double Distance(vector<double>& a, vector<double>& b)
 {
 	double result = 0.0;
 
+#pragma omp paralle for reduction(+:result)
 	for(int i = 0; i < cols; i++)
 	{
 		result += (a[i] - b[i]) * (a[i] - b[i]);
@@ -341,55 +223,61 @@ double Distance(vector<double>& a, vector<double>& b)
 }
 
 // Opimalizace vytvorenim 1 promenne maximum
-double GetSumAvlSml(int i, int k)
+int GetMaxAvlSml(int i, int k)
 {
-	vector<double> mxm = vector<double>();
+	int result = -numeric_limits<double>::infinity(), tmp;
 
+#pragma omp parallel for
 	for(int kNoted = 0; kNoted < rows; kNoted++)
 	{
 		if (kNoted != k)
 		{
 			// max(A[i, k'] + S[i, k']); {k' != k}
-			mxm.push_back(Avl[i][kNoted] + Sml[i][kNoted]);
-		}
-	}
+			tmp = Avl[i][kNoted] + Sml[i][kNoted];
 
-	return *max_element(mxm.begin(), mxm.end());
-}
-
-// + Sum of max(0, R[i', k])
-double GetSumRsp(int i, int k)
-{
-	double result = 0.0;
-
-	for(int iNoted = 0; iNoted < rows; iNoted++)
-	{
-		if (iNoted != i)
-		{
-			// sum += max(0.0, R[i', k])
-			result += max(0.0, Rsp[iNoted][k]);
+			if (tmp > result)
+			{
+				result = tmp;
+			}
 		}
 	}
 
 	return result;
 }
 
-void InitMatricies(vector<vector<double>>& data)
+// + Sum of max(0, R[i', k])
+int GetSumRsp(int i, int k)
 {
-	// Rows and Cols should be the same number
-	int i = 0, j = 0;
+	int result = 0;
 
+#pragma omp paralell for reduction(+:result)
+	for(int iNoted = 0; iNoted < rows; iNoted++)
+	{
+		if (iNoted != i)
+		{
+			// sum += max(0.0, R[i', k])
+			result += max(0, Rsp[iNoted][k]);
+		}
+	}
+
+	return result;
+}
+
+void CalculateSimilarity(vector<vector<double>>& data)
+{
 	// Update Similarity
 	vector<double> mdn = vector<double>();
 	int mdnSize = 0;
+	// int i, j;
 	double median = 0.0;
 
-	for(i = 0; i < rows; i++)
+#pragma omp parallel for //collapse(2)
+	for(int i = 0; i < rows; i++)
 	{
-		vector<double> tmp;
-		vector<double> empty(rows, 0.0);
+		vector<int> tmp;
+		vector<int> empty(rows, 0);
 
-		for(j = 0; j < rows; j++)
+		for(int j = 0; j < rows; j++)
 		{
 			double dst = Distance(data[i], data[j]);
 			
@@ -413,62 +301,166 @@ void InitMatricies(vector<vector<double>>& data)
 	{
 		median = mdn[mdnSize / 2];
 	}
-	
-	for (i = 0; i < rows; i++)
+
+#pragma omp parallel for
+	for (int i = 0; i < rows; i++)
 	{
 		Sml[i][i] = median;
 	}
+}
 
+void UpdateResponsibility()
+{
 	// Update Responsibilities -> Step 3
-	for(i = 0; i < rows; i++)
+#pragma omp parallel for //collapse(2)
+	for(int i = 0; i < rows; i++)
 	{
-		for(j = i; j < rows; j++)
+		for(int j = 0; j < rows; j++)
 		{
 			// R[i, k] = S[i, k] - max(A[i, k'] + S[i, k']); {k' != k}
-			Rsp[i][j] = Rsp[j][i] = Sml[i][j] - GetSumAvlSml(i, j);
+			Rsp[i][j] = Sml[i][j] - GetMaxAvlSml(i, j);
 		}
 	}
+}
 
+void UpdateAvailability()
+{
 	// Update Availability -> Step 3
-	for(i = 0; i < rows; i++)
+#pragma omp parallel for //collapse(2)
+	for(int i = 0; i < rows; i++)
 	{
-		for(j = i;j < rows;j++)
+		for(int j = 0;j < rows;j++)
 		{
 			if (i != j)
 			{
-				Avl[i][j] = Avl[j][i] = min(0.0, Rsp[j][j] + GetSumRsp(i, j));
+				Avl[i][j] = min(0, Rsp[j][j] + GetSumRsp(i, j));
 			}
 			else
 			{
-				Avl[i][j] = Avl[j][i] = GetSumRsp(i, j);
+				// Upravid drobnz preklep v sume i' != k, ne i
+				Avl[i][j] = GetSumRsp(i, j);
 			}
 		}
 	}
+}
+
+bool UpdateClusters()
+{
+	newClusters.clear();
+	newClusters.resize(rows);
 
 	// Calculate Criteria Matrix C
-	for(i = 0; i < rows; i++)
+//#pragma omp parallel for //collapse(2)
+	for(int i = 0; i < rows; i++)
 	{
-		for(j = i;j < rows;j++)
+		//cout << "i: " << i << ", [";
+		for(int j = 0;j < rows;j++)
 		{
-			Crt[i][j] = Crt[j][i] = Rsp[i][j] + Avl[i][j];
+			Crt[i][j] = Rsp[i][j] + Avl[i][j];
+			// cout << j << " ";
 		}
+		//cout << "]" << endl;
 
 		Pair p;
-		p.clusterNum = distance(Crt[i].begin(), max_element(Crt[i].begin(), Crt[i].end())) + 1;
-		p.pointNumber = i;
-		clusters.push_back(p);
+		//cout << "New p" << endl;
+		// p.clusterNum = distance(Crt[i].begin(), max_element(Crt[i].begin(), Crt[i].end())) + 1;
+		p.clusterNum = 0;
+		p.pointNumber = 1;
+		// << "p set" << endl;
+		// << newClusters.size() << endl;
+		newClusters.push_back(p);
+		// << "p pushed" << endl;
 	}
+	cout << "Crt Updated" << endl;
+
+	if (clusters.size() != newClusters.size())
+	{
+		clusters = newClusters;
+		cout << "Clusters set" << endl;
+
+		return false;
+	}
+	
+
+	cout << "newDiffCount calculation" << endl;
+#pragma omp parallel for	
+	for (int i = 0; i < clusters.size(); i++)
+	{
+		if (clusters[i].clusterNum != newClusters[i].clusterNum)
+		{
+			newDiffcount++;
+		}
+	}
+
+	if (newDiffcount == 0)
+	{
+		// Nenasel jsme zmenu v Clusterech, muzu rovnou vypsat a ukoncit
+		return true;
+	}
+
+	diffCount = newDiffcount;
+
+	return false;
+}
+
+void DelegateAndIterate(int maxIterations)
+{
+	for (int i = 0; i < maxIterations; i++)
+	{
+		cout << "Responsibilities" << endl;
+		UpdateResponsibility();
+		cout << "Availabilities" << endl;
+		UpdateAvailability();
+		
+		cout << "Cluster check" << endl;
+		bool val = UpdateClusters();
+
+		if (val)
+		{
+			break;
+		}
+	}
+
+	PrintMatricies();
+	PrintClusters();
 }
 #pragma endregion
 
 int main(int argc, char* argv[])
 {
-	vector<vector<double>> data = LoadData("file_name.csv");
-	PrintAffinityData(testData);
-	InitMatricies(testData);
-	PrintMatricies();
+	LoadData("archive/mnist_test.csv");
+
+	cout << "Sml: [" << Sml.size() << ", " << Sml[0].size() << "]" << endl;
+	cout << "Rsp: [" << Rsp.size() << ", " << Rsp[0].size() << "]" << endl;
+	cout << "Avl: [" << Avl.size() << ", " << Avl[0].size() << "]" << endl;
+	cout << "Crt: [" << Crt.size() << ", " << Crt[0].size() << "]" << endl;
+
+	// vector<Pair> pairs = vector<Pair>();
+	// int i = 0;
+	// while(true)
+	// {
+	// 	Pair p;
+	// 	p.clusterNum = i;
+	// 	p.pointNumber = i*2;
+
+	// 	pairs.push_back(p);
+	// 	cout << i++ << endl;
+	// }
+	// return 0;
+
+	DelegateAndIterate(1000);
 
 	return 0;
 }
 
 // Simple paralizace maticovych operaci -> Operace 3 a 4
+// Jak funguje omp parallel + vlastne chci aby se pole Clustr nezmenilo
+
+/*
+Omp parallel je alternativa vlaken
+Na pozadi je stejne pouziva
+Viceme nahrada Task v C#
+
+pragma omp paralell for vezme vsechny iterace cyklu for, rozdeli je do skupin a nasledne kazdou skupinu spusti nad samostatnym vlaknem 
+Buron doporucuje pragma
+*/
