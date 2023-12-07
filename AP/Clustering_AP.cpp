@@ -10,6 +10,8 @@
 
 using namespace std;
 
+#pragma region "k-means"
+
 /*
 Podpora pro pragmu simd musi byt explicitne zapnuta;
 	> MSVC: https://learn.microsoft.com/cs-cz/cpp/build/reference/openmp-enable-openmp-2-0-support?view=msvc-170
@@ -176,9 +178,9 @@ void step_2(const unsigned int m, const unsigned int n, const bool use_simd)
 
 	delete[] data;
 }
+#pragma endregion
 
 #pragma region "Affinity Propagation"
-
 struct Pair
 {
 	int pointNumber;
@@ -221,13 +223,22 @@ std::vector<std::vector<double>> testData =
 	{2.0, 7.0, 1.2}
 };
 
+vector<vector<double>> LoadData(string filePath)
+{
+	rows = testData.size();
+	cols = testData[0].size();
+
+	vector<vector<double>> result = vector<vector<double>>();
+
+
+
+	return result;
+}
+
 void PrintAffinityData(vector<vector<double>>& data)
 {
 	std::cout << std::fixed;
     std::cout << std::setprecision(1);
-
-	rows = data.size();
-	cols = data[0].size();
 
 	cout << "Data: \n";
 	cout << "---------------------------------------------------------------" << endl;
@@ -317,7 +328,7 @@ void PrintMatricies()
 	cout << endl;
 }
 
-double DistanceAffinity(vector<double>& a, vector<double>& b)
+double Distance(vector<double>& a, vector<double>& b)
 {
 	double result = 0.0;
 
@@ -329,6 +340,7 @@ double DistanceAffinity(vector<double>& a, vector<double>& b)
 	return -1 * sqrt(result);
 }
 
+// Opimalizace vytvorenim 1 promenne maximum
 double GetSumAvlSml(int i, int k)
 {
 	vector<double> mxm = vector<double>();
@@ -352,7 +364,7 @@ double GetSumRsp(int i, int k)
 
 	for(int iNoted = 0; iNoted < rows; iNoted++)
 	{
-		if (iNoted != k)
+		if (iNoted != i)
 		{
 			// sum += max(0.0, R[i', k])
 			result += max(0.0, Rsp[iNoted][k]);
@@ -379,7 +391,7 @@ void InitMatricies(vector<vector<double>>& data)
 
 		for(j = 0; j < rows; j++)
 		{
-			double dst = DistanceAffinity(data[i], data[j]);
+			double dst = Distance(data[i], data[j]);
 			
 			tmp.push_back(dst);
 			mdn.push_back(dst);
@@ -410,25 +422,25 @@ void InitMatricies(vector<vector<double>>& data)
 	// Update Responsibilities -> Step 3
 	for(i = 0; i < rows; i++)
 	{
-		for(j = 0; j < rows; j++)
+		for(j = i; j < rows; j++)
 		{
 			// R[i, k] = S[i, k] - max(A[i, k'] + S[i, k']); {k' != k}
-			Rsp[i][j] = Sml[i][j] - GetSumAvlSml(i, j);
+			Rsp[i][j] = Rsp[j][i] = Sml[i][j] - GetSumAvlSml(i, j);
 		}
 	}
 
 	// Update Availability -> Step 3
 	for(i = 0; i < rows; i++)
 	{
-		for(j = 0;j < rows;j++)
+		for(j = i;j < rows;j++)
 		{
 			if (i != j)
 			{
-				Avl[i][j] = min(0.0, Rsp[j][j] + GetSumRsp(i, j));
+				Avl[i][j] = Avl[j][i] = min(0.0, Rsp[j][j] + GetSumRsp(i, j));
 			}
 			else
 			{
-				Avl[i][j] = GetSumRsp(i, j);
+				Avl[i][j] = Avl[j][i] = GetSumRsp(i, j);
 			}
 		}
 	}
@@ -447,18 +459,16 @@ void InitMatricies(vector<vector<double>>& data)
 		clusters.push_back(p);
 	}
 }
-
 #pragma endregion
-
 
 int main(int argc, char* argv[])
 {
-	const unsigned int rows = testData.size();
-	const unsigned int cols = testData[0].size();
-
+	vector<vector<double>> data = LoadData("file_name.csv");
 	PrintAffinityData(testData);
 	InitMatricies(testData);
 	PrintMatricies();
 
 	return 0;
 }
+
+// Simple paralizace maticovych operaci -> Operace 3 a 4
